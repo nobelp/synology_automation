@@ -12,7 +12,7 @@ import socket
 import json as _json
 import urllib3
 import os
-from dotenv import load_dotenv
+
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -20,7 +20,14 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # KONFIGURATION (aus .env)
 # =========================================
 
-load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
+# env laden ohne dotenv
+env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+if os.path.exists(env_path):
+    for line in open(env_path):
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            k, v = line.split("=", 1)
+            os.environ.setdefault(k.strip(), v.strip())
 
 OMADA_HOST   = os.environ["OMADA_HOST"]
 OMADA_PORT   = int(os.environ.get("OMADA_PORT", "443"))
