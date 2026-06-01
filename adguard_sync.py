@@ -2,6 +2,7 @@
 """
 Omada + Docker -> AdGuard Home Client Sync
 Source of Truth: Omada (MAC als Schluessel)
+Inkl. DHCP-Reservierungen (auch Offline-Geraete)
 """
 
 import requests
@@ -10,25 +11,29 @@ import sys
 import socket
 import json as _json
 import urllib3
+import os
+from dotenv import load_dotenv
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # =========================================
-# KONFIGURATION
+# KONFIGURATION (aus .env)
 # =========================================
 
-OMADA_HOST      = "https://192.168.2.104"
-OMADA_PORT      = 443
-OMADA_USER      = "hassio.api"
-OMADA_PASS      = "T9!qM_7F{AeZ5$Lx@Kp2]hR^C)S-wJ8"
-OMADA_SITE      = "MasterSite"
+load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 
-ADGUARD_HOST    = "http://192.168.2.200"
-ADGUARD_PORT    = 9080
-ADGUARD_USER    = "adguard_admin"
-ADGUARD_PASS    = r"z\k-6xZ&>`~;c7a.tDw~+wW^UR3J,%ngqv8+zM9;LQw&W}g^2{"
+OMADA_HOST   = os.environ["OMADA_HOST"]
+OMADA_PORT   = int(os.environ.get("OMADA_PORT", "443"))
+OMADA_USER   = os.environ["OMADA_USER"]
+OMADA_PASS   = os.environ["OMADA_PASS"]
+OMADA_SITE   = os.environ.get("OMADA_SITE", "MasterSite")
 
-LOG_FILE        = "/volume1/docker/adguard_sync/sync.log"
+ADGUARD_HOST = os.environ["ADGUARD_HOST"]
+ADGUARD_PORT = int(os.environ.get("ADGUARD_PORT", "9080"))
+ADGUARD_USER = os.environ["ADGUARD_USER"]
+ADGUARD_PASS = os.environ["ADGUARD_PASS"]
+
+LOG_FILE     = os.environ.get("LOG_FILE", "/volume1/docker/adguard_sync/sync.log")
 
 # =========================================
 # TAG MAPPING
@@ -62,14 +67,14 @@ DEVICE_TYPE_MAP = {
 }
 
 OS_MAP = {
-    "ios":       "os_ios",
-    "macos":     "os_macos",
-    "windows":   "os_windows",
-    "android":   "os_android",
-    "linux":     "os_linux",
-    "dsm":       "os_linux",
-    "sonos":     "os_other",
-    "tvos":      "os_other",
+    "ios":      "os_ios",
+    "macos":    "os_macos",
+    "windows":  "os_windows",
+    "android":  "os_android",
+    "linux":    "os_linux",
+    "dsm":      "os_linux",
+    "sonos":    "os_other",
+    "tvos":     "os_other",
 }
 
 def get_tags(device_type, os_name):
@@ -110,7 +115,7 @@ def format_mac(mac):
 # OMADA API
 # =========================================
 
-def omada_get_clients():
+def omada_login():
     base = "%s:%d" % (OMADA_HOST, OMADA_PORT)
     session = requests.Session()
     session.verify = False
@@ -148,11 +153,14 @@ def omada_get_clients():
         raise Exception("Site '%s' nicht gefunden!" % OMADA_SITE)
     log.info("Site ID: %s" % site_id)
 
+    return session, base, controller_id, site_id, headers
+
+def omada_get_active_clients(session, base, controller_id, site_id, headers):
     macs = []
     page = 1
     while True:
         r = session.get(
-            "%s/%s/api/v2/sites/%s/insight/clients?currentPage=%d&currentPageSize=100" % (base, controller_id, site_id, page),
+            "%s/%s/api/v2/sites/%s/clients?currentPage=%d&currentPageSize=200&filters.active=false" % (base, controller_id, site_id, page),
             headers=headers, timeout=10
         )
         r.raise_for_status()
@@ -162,7 +170,7 @@ def omada_get_clients():
         if len(macs) >= result.get("totalRows", 0):
             break
         page += 1
-    log.info("Omada: %d MACs gefunden" % len(macs))
+    log.info("Omada aktive Clients: %d MACs" % len(macs))
 
     clients = []
     for mac in macs:
@@ -172,10 +180,69 @@ def omada_get_clients():
         )
         if r.json().get("errorCode") == 0:
             clients.append(r.json()["result"])
-
-    log.info("Omada: %d Client-Details geladen" % len(clients))
-    session.post("%s/%s/api/v2/logout" % (base, controller_id), headers=headers, timeout=10)
+    log.info("Omada aktive Client-Details: %d" % len(clients))
     return clients
+
+def omada_get_dhcp_reservations(session, base, controller_id, site_id, headers):
+    """Liest DHCP-Reservierungen - auch Offline-Geraete wie Dell Screen etc."""
+    try:
+        r = session.get(
+            "%s/%s/api/v2/sites/%s/setting/lan/dhcpReservation?currentPage=1&currentPageSize=200" % (base, controller_id, site_id),
+            headers=headers, timeout=10
+        )
+        r.raise_for_status()
+        data = r.json()
+        reservations = data.get("result", {}).get("data", [])
+        log.info("Omada DHCP-Reservierungen: %d gefunden" % len(reservations))
+        return reservations
+    except Exception as e:
+        log.warning("DHCP-Reservierungen konnten nicht geladen werden: %s" % e)
+        return []
+
+def omada_get_clients():
+    session, base, controller_id, site_id, headers = omada_login()
+
+    active = omada_get_active_clients(session, base, controller_id, site_id, headers)
+    reservations = omada_get_dhcp_reservations(session, base, controller_id, site_id, headers)
+
+    session.post("%s/%s/api/v2/logout" % (base, controller_id), headers=headers, timeout=10)
+
+    # Aktive Clients als Basis
+    combined = {}
+    for c in active:
+        mac = format_mac(c.get("mac", ""))
+        name = c.get("name", "")
+        ip = c.get("ip", "")
+        device_type = c.get("deviceType", "")
+        os_name = c.get("osName", "")
+        is_mac_name = len(name) == 17 and (name.count("-") == 5 or name.count(":") == 5)
+        if mac and ip and name and not is_mac_name:
+            combined[mac] = {
+                "name": name,
+                "ip": ip,
+                "mac": c.get("mac", ""),
+                "tags": get_tags(device_type, os_name)
+            }
+
+    # DHCP-Reservierungen ergaenzen (nur wenn nicht bereits aktiv vorhanden)
+    dhcp_added = 0
+    for r in reservations:
+        mac = format_mac(r.get("mac", ""))
+        name = r.get("hostName") or r.get("name") or r.get("clientName") or ""
+        ip = r.get("ip", "")
+        is_mac_name = len(name) == 17 and (name.count("-") == 5 or name.count(":") == 5)
+        if mac and ip and name and not is_mac_name and mac not in combined:
+            combined[mac] = {
+                "name": name,
+                "ip": ip,
+                "mac": r.get("mac", ""),
+                "tags": ["device_other"]
+            }
+            dhcp_added += 1
+
+    log.info("DHCP-Reservierungen neu hinzugefuegt: %d" % dhcp_added)
+    log.info("Gesamt verwertbare Clients: %d" % len(combined))
+    return combined
 
 # =========================================
 # DOCKER API
@@ -279,29 +346,10 @@ def adguard_update_client(old_name, name, ip, mac=None, tags=None):
 
 def sync_omada():
     log.info("=" * 50)
-    log.info("Starte Omada -> AdGuard Sync (MAC als Schluessel)")
+    log.info("Starte Omada -> AdGuard Sync (inkl. DHCP-Reservierungen)")
     log.info("=" * 50)
 
-    omada_clients = omada_get_clients()
-
-    omada_by_mac = {}
-    for c in omada_clients:
-        name = c.get("name", "")
-        ip   = c.get("ip", "")
-        mac  = c.get("mac", "")
-        device_type = c.get("deviceType", "")
-        os_name     = c.get("osName", "")
-        is_mac_name = len(name) == 17 and (name.count("-") == 5 or name.count(":") == 5)
-        if name and ip and mac and not is_mac_name:
-            tags = get_tags(device_type, os_name)
-            omada_by_mac[format_mac(mac)] = {
-                "name": name,
-                "ip": ip,
-                "mac": mac,
-                "tags": tags
-            }
-
-    log.info("Verwertbare Omada Clients: %d" % len(omada_by_mac))
+    omada_by_mac = omada_get_clients()
 
     existing = adguard_get_clients()
     ag_by_mac  = {}
@@ -315,10 +363,10 @@ def sync_omada():
     added = updated = skipped = 0
 
     for mac, info in omada_by_mac.items():
-        name = info["name"]
-        ip   = info["ip"]
+        name    = info["name"]
+        ip      = info["ip"]
         raw_mac = info["mac"]
-        tags = info["tags"]
+        tags    = info["tags"]
 
         if mac in ag_by_mac:
             existing_client = ag_by_mac[mac]
@@ -326,7 +374,6 @@ def sync_omada():
             existing_ids = existing_client.get("ids", [])
             existing_ip = next((id_ for id_ in existing_ids if ":" not in id_ or len(id_) != 17), None)
             existing_tags = existing_client.get("tags", [])
-
             if old_name != name or existing_ip != ip or existing_tags != tags:
                 adguard_update_client(old_name, name, ip, raw_mac, tags)
                 updated += 1
@@ -379,7 +426,6 @@ def sync_docker():
         for id_ in c.get("ids", []):
             existing_ips[id_] = c["name"]
 
-    # Docker Tags: immer device_other + os_linux
     docker_tags = ["device_other", "os_linux"]
 
     added = updated = skipped = 0
