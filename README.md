@@ -15,13 +15,13 @@ Synchronisiert Clients von Omada Controller + Docker automatisch nach AdGuard Ho
 ### Omada Controller
 - Host: `https://192.168.2.104:443`
 - Benutzer: `hassio.api`
-- Passwort: `T9!qM_7F{AeZ5$Lx@Kp2]hR^C)S-wJ8`
+- Passwort: `*****`
 - Site: `MasterSite`
 
 ### AdGuard Home
 - Host: `http://192.168.2.200:9080`
 - Benutzer: `adguard_admin`
-- Passwort: `z\k-6xZ&>\`~;c7a.tDw~+wW^UR3J,%ngqv8+zM9;LQw&W}g^2{`
+- Passwort: `****`
 
 ### Docker
 - Socket: `/var/run/docker.sock`
